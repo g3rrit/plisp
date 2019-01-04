@@ -1,4 +1,6 @@
-
+extern void *malloc(size_t);
+extern void free(void*);
+extern printf;
 
 enum {
   TINT = 1,
@@ -40,13 +42,13 @@ struct obj_t {
 
 
 //Constanst
-static obj_t *True    = &(obj_t) { TTRUE };
-static obj_t *Nil     = &(obj_t) { TNIL };
-static obj_t *Dot     = &(obj_t) { TDOT };
-static obj_t *Cparen  = &(obj_t) { TCPAREN };
+static struct obj_t *True    = &(struct obj_t) { TTRUE };
+static struct obj_t *Nil     = &(struct obj_t) { TNIL };
+static struct obj_t *Dot     = &(struct obj_t) { TDOT };
+static struct obj_t *Cparen  = &(struct obj_t) { TCPAREN };
 
 //list containing all symbols
-static obj_t *symbols;
+static struct obj_t *symbols;
 
 void error(char *emsg) {
   printf("error: %s\n", emsg);
@@ -78,13 +80,20 @@ void obj_list_add(struct obj_t *obj) {
 unsigned int mem_used = 0;
 
 static void gc(void *root) {
-   
-  struct obj_list_t **entry = &obj_list;
-  while(*entry) {
-    if(*entry->obj->gc_r)
-      free(*entry->obj->gc_r);
+  //walk root and set flag
 
 
+  //free all objs that have flag set
+  struct obj_list_t *f_entry = 0;
+  for(struct obj_list_t **entry = &obj_list; *entry;) {
+    if(!*entry->obj->gc_r) {
+      free(*entry->obj);
+      f_entry = *entry;
+    }
+    *entry->obj->gc_r = 0;
+    entry = &entry->next;
+    free(f_entry);
+    f_entry = 0;
   }
 }
 
