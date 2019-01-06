@@ -1,10 +1,8 @@
-extern void *malloc(size_t);
-extern void free(void*);
-extern printf;
-extern int getchar();
-extern void assert(int);
-extern int strcmp(char*,char*);
-extern int strcpy(char*,char*);
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stddef.h>
+#include <assert.h>
 
 enum {
   TINT = 1,
@@ -21,7 +19,7 @@ enum {
 };
 
 struct obj_t;
-typedef struct obj_t *primative(struct obj_t *root, struct obj_t **env, struct obj **args);
+typedef struct obj_t *primative(struct obj_t *root, struct obj_t **env, struct obj_t **args);
 
 typedef struct obj_t {
   int type;
@@ -36,6 +34,12 @@ typedef struct obj_t {
     };
     char *name;     //Symbol
     primative *fn;  //Primative
+
+    struct {        //Function
+      struct obj_t *params;
+      struct obj_t *body;
+      struct obj_t *env;
+    };
 
     struct {        //Env frame
       struct obj_t *vars;
@@ -90,12 +94,12 @@ static void gc(obj_t *root) {
   //free all objs that have flag set
   obj_list_t *f_entry = 0;
   for(obj_list_t **entry = &obj_list; *entry;) {
-    if(!*entry->obj->gc_r) {
-      free(*entry->obj);
+    if(!(*entry)->obj->gc_r) {
+      free((*entry)->obj);
       f_entry = *entry;
     }
-    *entry->obj->gc_r = 0;
-    entry = &entry->next;
+    (*entry)->obj->gc_r = 0;
+    entry = &((*entry)->next);
     free(f_entry);
     f_entry = 0;
   }
@@ -104,10 +108,10 @@ static void gc(obj_t *root) {
 static obj_t *alloc(obj_t *root, int type, size_t size) {
   size += offsetof(obj_t, value);
 
-  if(size + mem_used >= MEM_MAX)
+  if(size + mem_used >= MAX_MEM)
     gc(root);
 
-  if(size + mem_used >= MEM_MAX) {
+  if(size + mem_used >= MAX_MEM) {
     error("memory exhausted");
     exit(0);
   }
@@ -130,7 +134,7 @@ static obj_t *alloc(obj_t *root, int type, size_t size) {
 #define ROOT_END  ((void*)-1)
 
 #define ADD_ROOT(size)                        \
-  obj_t *root_ADD_ROOT_[size+2]               \
+  obj_t *root_ADD_ROOT_[size+2];              \
   root_ADD_ROOT_[0] = root;                   \
   for(int i = 1; i <= size; i++)              \
     root_ADD_ROOT_[i] = 0;                    \
@@ -138,26 +142,26 @@ static obj_t *alloc(obj_t *root, int type, size_t size) {
   root = root_ADD_ROOT_;
 
 #define DEFINE1(var1)                         \
-  ADD_ROOT(1)                                 \
-  obj_t *var1 = (obj_t*)(root_ADD_ROOT_ + 1)  \
+  ADD_ROOT(1);                                \
+  obj_t *var1 = (obj_t*)(root_ADD_ROOT_ + 1); \
 
 #define DEFINE2(var1, var2)                   \
-  ADD_ROOT(2)                                 \
-  obj_t *var1 = (obj_t*)(root_ADD_ROOT_ + 1)  \
-  obj_t *var2 = (obj_t*)(root_ADD_ROOT_ + 2)  \
+  ADD_ROOT(2);                                \
+  obj_t *var1 = (obj_t*)(root_ADD_ROOT_ + 1); \
+  obj_t *var2 = (obj_t*)(root_ADD_ROOT_ + 2); \
     
 #define DEFINE3(var1, var2, var3)             \
-  ADD_ROOT(3)                                 \
-  obj_t *var1 = (obj_t*)(root_ADD_ROOT_ + 1)  \
-  obj_t *var2 = (obj_t*)(root_ADD_ROOT_ + 2)  \
-  obj_t *var3 = (obj_t*)(root_ADD_ROOT_ + 3)  \
+  ADD_ROOT(3);                                \
+  obj_t *var1 = (obj_t*)(root_ADD_ROOT_ + 1); \
+  obj_t *var2 = (obj_t*)(root_ADD_ROOT_ + 2); \
+  obj_t *var3 = (obj_t*)(root_ADD_ROOT_ + 3); \
  
 #define DEFINE4(var1, var2, var3, var4)       \
-  ADD_ROOT(4)                                 \
-  obj_t *var1 = (obj_t*)(root_ADD_ROOT_ + 1)  \
-  obj_t *var2 = (obj_t*)(root_ADD_ROOT_ + 2)  \
-  obj_t *var3 = (obj_t*)(root_ADD_ROOT_ + 3)  \
-  obj_t *var4 = (obj_t*)(root_ADD_ROOT_ + 4)  \
+  ADD_ROOT(4);                                \
+  obj_t *var1 = (obj_t*)(root_ADD_ROOT_ + 1); \
+  obj_t *var2 = (obj_t*)(root_ADD_ROOT_ + 2); \
+  obj_t *var3 = (obj_t*)(root_ADD_ROOT_ + 3); \
+  obj_t *var4 = (obj_t*)(root_ADD_ROOT_ + 4); \
  
 //---------------------------------------- 
 // Constructors
@@ -169,8 +173,8 @@ static obj_t *make_int(obj_t *root, int value) {
   return obj;
 }
 
-static obj_t *cons(obj_t *root, obj_t *var, obj_t *cdr) {
-  obj_t *obj = cell = alloc(root, TCELL, sizeof(obj_t*) * 2);
+static obj_t *cons(obj_t *root, obj_t *car, obj_t *cdr) {
+  obj_t *obj = alloc(root, TCELL, sizeof(obj_t*) * 2);
   obj->car = car;
   obj->cdr = cdr;
   return obj;
@@ -283,7 +287,7 @@ static obj_t *read_quote(obj_t *root) {
   sym = intern(root, "quote");
   tmp = read_exp(root);
   tmp = cons(root, tmp, &Nil);
-  tmp = cons(root, sym, rmp);
+  tmp = cons(root, sym, tmp);
   return tmp;
 }
 
@@ -293,7 +297,7 @@ static int read_number(int val) {
   return val;
 }
 
-static obj_t *read_symbol(void *root, char c) {
+static obj_t *read_symbol(obj_t *root, char c) {
   char buf[SYMBOL_MAX_LEN + 1];
   buf[0] = c;
   int len = 1;
@@ -306,7 +310,7 @@ static obj_t *read_symbol(void *root, char c) {
   return intern(root, buf);
 }
 
-static obj_t *read_exp(void *root) {
+static obj_t *read_exp(obj_t *root) {
   for(;;) {
     int c = getchar();
     if(c == ' ' || c == '\n' || c == '\r' || c == '\t') 
@@ -331,7 +335,7 @@ static obj_t *read_exp(void *root) {
       return make_int(root, -read_number(0));
     if(isalpha(c) || strchr(symbol_chars, c))
       return read_symbol(root, c);
-    errot("unable to handle char"); //TODO: print c
+    error("unable to handle char"); //TODO: print c
   }
 }
 
@@ -363,9 +367,8 @@ static void print(obj_t *obj) {
   CASE(TPRIMATIVE, "<primative>");
   CASE(TFUNCTION, "<function>");
   CASE(TMACRO, "<macro>");
-  CASE(TMOVED, "<moved>");
   CASE(TTRUE, "t");
-  case(TNIL, "()");
+  CASE(TNIL, "()");
 #undef CASE
   
   default:
@@ -396,7 +399,7 @@ static void add_variable(obj_t *root, obj_t *env, obj_t *sym, obj_t *val) {
 static obj_t *push_env(obj_t *root, obj_t *env, obj_t *vars, obj_t *vals) {
   DEFINE3(map, sym, val);
   map = Nil;
-  for(; vars->type == TCEL; vars = vars->cdr, vals = vals->cdr) {
+  for(; vars->type == TCELL; vars = vars->cdr, vals = vals->cdr) {
     if(vals->type != TCELL) 
       error("cannot apply function: number of argument does not match");
     sym = vars->car;
