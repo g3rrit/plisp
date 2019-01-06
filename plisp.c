@@ -6,6 +6,17 @@ extern void assert(int);
 extern int strcmp(char*,char*);
 extern int strcpy(char*,char*);
 
+static void error(char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  fprintf(stderr, "error: ");
+  vfprintf(stderr, fmt, ap);
+  fprintf(stderr, "\n");
+  va_end(ap);
+  exit(1);
+}
+
+
 enum {
   TINT = 1,
   TCELL,
@@ -53,10 +64,6 @@ static obj_t *Cparen  = &(obj_t) { TCPAREN };
 
 //list containing all symbols
 static obj_t *symbols;
-
-void error(char *emsg) {
-  printf("error: %s\n", emsg);
-}
 
 //---------------------------------------- 
 // Memory management
@@ -331,7 +338,7 @@ static obj_t *read_exp(void *root) {
       return make_int(root, -read_number(0));
     if(isalpha(c) || strchr(symbol_chars, c))
       return read_symbol(root, c);
-    errot("unable to handle char"); //TODO: print c
+    errot("unable to handle char: %c", c); 
   }
 }
 
@@ -409,17 +416,395 @@ static obj_t *push_env(obj_t *root, obj_t *env, obj_t *vars, obj_t *vals) {
 }
 
 //evaluates the list elements from the head and returns the last value
+static obj_t *progn(obj_t *root, obj_t *env, obj_t *list) {
+  DEFINE2(lp, r);
+  for(lp = list; lp != Nil; lp = lp->cdr) {
+    r = lp->car;
+    r = eval(root, env, r);
+  }
+  return r;
+}
 
+//evaluates all the list elements and returns their return  values as a new list
+static obj_t *eval_list(obj_t *root, obj_t *env, obj_t *list) {
+  DEFINE4(head, lp, expr, result);
+  head = Nil;
+  for(lp = list; lp != Nil; lp = lp->cdr) {
+    expr = lp->car;
+    result = eval(root, env, expr);
+    head = cons(root, result, head); 
+  }
+  return reverse(head);
+}
 
+static int is_list(obj_t *obj) {
+  return obj == Nil || obj->type == TCELL;
+}
 
+static obj_t *apply_func(obj_t *root, obj_t *env, obj_t *fn, obj_t *args) {
+  DEFINE3(params, newenv, body);
+  params = fn->params;
+  newenv = fn->env;
+  newenv = push_env(root, newenv, params, args);
+  body = fn->body;
+  return progn(root, newenv, body);
+}
 
+//apply fn with args
+static obj_t *apply(obj_t *root, obj_t *env, obj_t *fn, obj_t *args) {
+  if(!is_list(args))
+    error("arguments must be a list");
+  if(fn->type == TPRIMATIVE)
+    return fn->fn(root, env, args);
+  if(fn->type == TFUNCTION) {
+    DEFINE1(eargs);
+    eargs = eval_list(root, env, args);
+    return apply_func(root, env, fn, eargs);
+  }
+  error("not supported");
+}
 
+//searches for a variable by symbol. returns 0 if not found
+static obj_t *find(obj_t *env, obj_t *sym) {
+  for(obj_t *p = env; p != Nil; p = p->up) {
+    for(obj_t *cell = p->vars; cell != Nill; cell = cell->cdr) {
+      obj_t *bind = cell->car;
+      if(sym == bind->car)
+        return bind;
+    }
+  }
+  return 0;
+}
 
+//expands the given macro application form
+static obj_t *macroexpand(obj_t *root, obj_t *env, obj_t *obj) {
+  if(obj->type != TCELL || obj->car->type != TSYMBOL)
+    return obj;
+  DEFINE3(bind, macro, args);
+  bind = find(env, obj->car);
+  if(!bind || bind->cdr->type != TMACRO)
+    return obj;
+  macro = bind->cdr;
+  args = obj->cdr;
+  return apply_func(root, env, macro, args);
+}
 
+//evaluates the s expression
+static obj_t *eval(obj_t *root, obj_t *env, obj_t *obj) {
+  switch(obj->type) {
+    case TINT:
+    case TPRIMITIVE:
+    case TFUNCTION:
+    case TTRUE:
+    case TNIL:
+      //self-evaluating objects
+      return obj;
+    case TSYMBOL: {
+      obj_t *bind = find(env, obj);
+      if(!bind) 
+        error("undefined symbol: %s", obj->name);
+      return bind->cdr;
+    }
+    case TCELL: {
+      DEFINE3(fn, expanded, args);
+      expanded = macroexpand(root, env, obj);
+      if(expanded != obj)
+        return eval(root, env, expanded);
+      fn = obj->car;
+      fn = eval(root, env, fn);
+      args = obj->cdr;
+      if(fn->type != TPRIMATIVE && fn->type != TFUNCTION)
+        error("the head of a list must be a function");
+      return apply(root, env, fn, args);
+    }
+    default:
+      error("bug: eval: unknown tag type: %d", obj->type);
+  }
+}
 
+//---------------------------------------- 
+// PRIMITIVE FUNCTIONS | SPECIAL FORMS
+//---------------------------------------- 
 
+// 'exp
+static obj_t *prim_quote(obj_t *root, obj_t *env, obj_t *list) {
+  if(length(list) != 1)
+    error("malformed quote");
+  return list->car;
+}
 
+// (cons exp exp)
+static obj_t *prim_cons(obj_t *root, obj_t *env, obj_t *list) {
+  if(length(list) != 2)
+    error("malformed cons");
+  obj *cell = eval_list(root, env, list);
+  cell->cdr = cell->cdr->car;
+  return cell;
+}
 
+// (car <cell>)
+static obj_t *prim_car(obj_t *root, obj_t *env, obj_t *list) {
+  obj_t *args= eval_list(root, env, list);
+  if(args->car->type != TCELL || args->cdr != Nil)
+    error("malformed car");
+  return args->car->car;
+}
 
+// (cdr <cell>)
+static obj_t *prim_cdr(obj_t *root, obj_t *env, obj_t *list) {
+  obj_t *args = eval_list(root, env, list);
+  if(args->car->type != TCELL || args->cdr != Nill)
+    error("malformed cdr");
+  return args->car->cdr;
+}
 
+// (setq <symbol> exp)
+static obj_t *prim_setq(obj_t *root, obj_t *env, obj_t *list) {
+  if(length(list) != 2 || list->car->type != TSYMBOL)
+    error("malformed setq");
+  DEFINE2(bind, value);
+  bind = find(env, list->car);
+  if(!bind) 
+    error("unbound variable %s", list->car->name);
+  value = list->cdr->car;
+  value = eval(root, env, value);
+  bind->cdr = value;
+  return value;
+}
 
+// (setcar <cell> exp)
+static obj_t *prim_setcar(obj_t *root, obj_t *env, obj_t *list) {
+  DEFINE2(args);
+  args = eval_list(root, env, list);
+  if(length(args) != 2 || args->car->type != TCELL)
+    error("malformed setcar");
+  args->car->car = args->cdr->car;
+  return args->car;
+}
+
+// (while cond exp ...)
+static obj_t *prim_while(obj_t *root, obj_t * env, obj_t *list) {
+  if(length(list) < 2)
+    error("malformed while");
+  DEFINE2(cond, exprs);
+  cond = list->car;
+  while(eval(root, env, cond) != Nil) {
+    exps = list->cdr;
+    eval_list(root, env, exprs);
+  }
+  return Nil;
+}
+
+// (gensym)
+static obj_t *prim_gensym(obj_t *root, obj_t *env, obj_t *list) {
+  static int count = 0;
+  char buf[10];
+  snprintf(buf, sizeof(buf), "G__%d", count++);
+  return make_symbol(root, buf);
+}
+
+// (add <integer> ...)
+static obj_t *prim_add(obj_t *root, obj_t *env, obj_t *list) {
+  int sum = 0;
+  for(obj_t *args = eval_list(root, env, list); args != Nil; args = args->cdr) {
+    if(args->car->type != TINT)
+      error("add takes only numbers");
+    sum += args->car->value;
+  }
+  return make_int(root, sum);
+}
+
+// (sub <integer> ...)
+static obj_t *prim_sub(obj_t *root, obj_t *env, obj_t *list) {
+  obj_t *args = eval_list(root, env, list);
+  for(obj_t *p = args; p != Nil; p = p->cdr)
+    if(p->car->type != TINT)
+      error("sub takes only numbers");
+  if(args->cdr == Nil)
+    return make_int(root, -args->car->value);
+  int r = args->car->value;
+  for(obj_t *p = args->cdr; p != Nil; p = p->cdr)
+    r -= p->car->value;
+  return make_int(root, r);
+}
+
+// (lt <integer> <integer>)
+static obj_t *prim_lt(obj_t *root, obj_t *env, obj_t *list) {
+  obj_t *args = eval_list(root, env, list);
+  if(length(args) != 2)
+    error("malformed lt");
+  obj_t *x = args->car;
+  obj_t *y = args->cdr->car;
+  if(x->type != TINT || y->type != TINT)
+    error("lt takes only numbers");
+  return x->value < y->value ? True : Nil;
+}
+
+static obj_t *handle_function(obj_t *root, obj_t *env, obj_t *list, int type) {
+  if(list->type != TCELL || !is_lsit(list->car) || list->cdr->type != TCELL)
+    error("malformed lambda");
+  obj_t *p = list->car;
+  for(; p->type == TCELL; p = p->cdr)
+    if(p->car->type != TSYMBOL)
+      error("parameter must be a symbol");
+  if(p != Nil && p->type != TSYMBOL)
+    error("parameter must be a symbol");
+  DEFINE2(params, body);
+  params = list->car;
+  body = list->cdr;
+  return make_function(root, env, type, params, body);
+}
+
+// (lambdy (<symbol> ...) expr ...)
+static obj_t *prim_lambda(obj_t *root, obj_t *env, obj_t *list) {
+  return handle_function(root, env, list, TFUNCTION);
+}
+
+static obj_t *handle_defun(obj_t *root, obj_t *env, obj_t *list, int type) {
+  if(list->car->type != TSYMBOL || list->cdr->type != TCELL)
+    error("malformed defun");
+  DEFINE3(fn, sym, rest);
+  sym = list->car;
+  rest = list->cdr;
+  fn = handle_function(root, env, rest, type);
+  add_variable(root, env, sym, fn);
+  return fn;
+}
+
+// (defun <symbol> (<symbol> ...) expr ...)
+static obj_t *prim_defun(obj_t *root, obj_t *env, obj_t *list) {
+  return handle_defun(root, env, list, TFUNCTION);
+}
+
+// (define <symbol> expr) 
+static obj_t *prim_define(obj_t *root, obj_t *env, obj_t *list) {
+  if(length(list) != 2 || list->car->type = TSYMBOL) 
+    error("malformed define");
+  DEFINE2(sym, value);
+  sym = list->car;
+  value = list->cdr->car;
+  value = eval(root, env, value);
+  add_variable(root, env, sym, value);
+}
+
+// (defmacro <symbol> (<symbol> ...) expr ...)
+static obj_t *prim_defmacro(obj_t *root, obj_t *env, obj_t *list) {
+  return handle_defun(root, env, list, TMACRO);
+}
+
+// (macroexpand expr)
+static obj_t *prim_macorexpand(obj_t *root, obj_t *env, obj_t *list) {
+  if(length(list) != 1)
+    error("malformed macorexpand");
+  DEFINE1(body);
+  body = list->car;
+  return macroexpand(root, env, body);
+}
+
+// (print expr)
+static obj_t *prim_print(obj_t *root, obj_t *env, obj_t *list) {
+  DEFINE1(tmp);
+  tmp = list->car;
+  print(eval(root, env, tmp));
+  printf("\n");
+  return Nil;
+}
+
+// (if expr expr expr ...)
+static obj_t *prim_if(obj_t *root, obj_t *env, obj_t *list) {
+  if(length(list) < 2)
+    error("malformed if");
+  DEFINE3(cond, then, els);
+  cond = list->car;
+  cond = eval(root, env, cond);
+  if(cond != Nil) {
+    then = list->cdr->car;
+    return eval(root, env, then);
+  }
+  els = list->cdr->cdr;
+  return els = Nil ? Nil : progn(root, env, els);
+}
+
+// (eq <integer> <integer>)
+static obj_t *prim_eq(void *root, obj_t *env, obj_t *list) {
+  if(length(list) != 2)=
+    error("malformed eq");
+  obj_t *values = eval_list(root, env, list);
+  obj_t *x = values->car;
+  obj_t *y = values->cdr->car;
+  if(x->type != TINT || y->type != TINT)
+    error("eq only takes numbers");
+  return x->value == y->value ? True : Nil;
+}
+
+// (cmp expr expr)
+static obj_t *prim_cmp(obj_t *root, obj_t *env, char *list) {
+  if(length(list) != 2) 
+    error("malformed cmp");
+  obj_t *values = eval_list(root, env, list);
+  return values->car == values->cdr->car ? True : Nil;
+}
+
+static void add_primitive(obj_t *root, obj_t *env, char *name, primitive *fn) {
+  DEFINE2(sym, prim);
+  sym = intern(root, name);
+  prim = make_primitive(root, fn);
+  add_variable(root, env, sym, prim);
+}
+
+static void define_constants(obj_t *root, obj_t *env) {
+  DEFINE1(sym);
+  sym = intern(root,"t");
+  add_variable(root, env, sym, True);
+}
+
+static void define_primitives(obj_t *root, obj_t *env) {
+  add_primitive(root, env, "quote", prim_quote);
+  add_primitive(root, env, "cons", prim_cons);
+  add_primitive(root, env, "car", prim_car);
+  add_primitive(root, env, "cdr", prim_cdr);
+  add_primitive(root, env, "setq", prim_setq);
+  add_primitive(root, env, "setcar", prim_setcar);
+  add_primitive(root, env, "while", prim_while);
+  add_primitive(root, env, "gensym", prim_gensym);
+  add_primitive(root, env, "add", prim_add);
+  add_primitive(root, env, "sub", prim_sub);
+  add_primitive(root, env, "lt", prim_lt);
+  add_primitive(root, env, "define", prim_define);
+  add_primitive(root, env, "defun", prim_defun);
+  add_primitive(root, env, "defmacro", prim_defmacro);
+  add_primitive(root, env, "macroexpand", prim_macroexpand);
+  add_primitive(root, env, "lambda", prim_lambda);
+  add_primitive(root, env, "if", prim_if);
+  add_primitive(root, env, "eq", prim_eq);
+  add_primitive(root, env, "cmp", prim_cmp);
+  add_primitive(root, env, "print", prim_print);
+}
+
+//---------------------------------------- 
+// ENTRY POINT
+//---------------------------------------- 
+
+int main(int argc, char **argv) {
+  
+  // constants and primitives
+  symbols = Nil;
+  obj_t *root = 0;
+  DEFINE2(env, expr);
+  env = make_env(root, Nil, Nil);
+  define_constants(root, env);
+  define_primitives(root, env);
+
+  // main loop
+  for(;;) {
+    expr = read_ex(root);
+    if(!exp) 
+      return 0;
+    if(expr == Cparen)
+      error("stry close paranthesis");
+    if(expr == Dot)
+      error("stray dot");
+    print(eval(root, env, expr));
+    printf("\n");
+  }
+}
