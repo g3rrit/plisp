@@ -6,6 +6,8 @@
 #include <stdarg.h>
 #include <ctype.h>
 
+#define ALWAYS_GC 0
+
 static void error(char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
@@ -41,7 +43,7 @@ typedef struct obj_t {
   int type;
   unsigned int size;
   unsigned char gc_r; // used by gc
-  
+
   union {
     int value;      //Int
     struct {        //Cell
@@ -75,8 +77,40 @@ static obj_t *Cparen  = &(obj_t) { TCPAREN };
 static obj_t *symbols;
 
 //---------------------------------------- 
-// Memory management
+// Memory management | GC
 //---------------------------------------- 
+
+#define ROOT_END  ((void*)-1)
+
+#define ADD_ROOT(size)                          \
+  void *root_ADD_ROOT_[size+2];                 \
+  root_ADD_ROOT_[0] = root;                     \
+  for(int i = 1; i <= size; i++)                \
+  root_ADD_ROOT_[i] = 0;                      \
+  root_ADD_ROOT_[size+1] = ROOT_END;            \
+  root = root_ADD_ROOT_;
+
+#define DEFINE1(var1)                           \
+  ADD_ROOT(1);                                  \
+  obj_t **var1 = (obj_t**)(root_ADD_ROOT_ + 1); \
+
+#define DEFINE2(var1, var2)                     \
+  ADD_ROOT(2);                                  \
+  obj_t **var1 = (obj_t**)(root_ADD_ROOT_ + 1); \
+  obj_t **var2 = (obj_t**)(root_ADD_ROOT_ + 2); \
+
+#define DEFINE3(var1, var2, var3)               \
+  ADD_ROOT(3);                                  \
+  obj_t **var1 = (obj_t**)(root_ADD_ROOT_ + 1); \
+  obj_t **var2 = (obj_t**)(root_ADD_ROOT_ + 2); \
+  obj_t **var3 = (obj_t**)(root_ADD_ROOT_ + 3); \
+
+#define DEFINE4(var1, var2, var3, var4)         \
+  ADD_ROOT(4);                                  \
+  obj_t **var1 = (obj_t**)(root_ADD_ROOT_ + 1); \
+  obj_t **var2 = (obj_t**)(root_ADD_ROOT_ + 2); \
+  obj_t **var3 = (obj_t**)(root_ADD_ROOT_ + 3); \
+  obj_t **var4 = (obj_t**)(root_ADD_ROOT_ + 4); \
 
 #define MAX_MEM 8096
 
@@ -99,9 +133,44 @@ void obj_list_add(obj_t *obj) {
 
 unsigned int mem_used = 0;
 
+static void mark_obj(obj_t *obj) {
+  obj->gc_r = 1;
+  switch(obj->type) {
+    case TINT:
+    case TSYMBOL:
+    case TPRIMITIVE:
+    case TTRUE:
+    case TNIL:
+    case TCPAREN:
+      break;
+    case TCELL:
+      mark_obj(obj->car);
+      mark_obj(obj->cdr);
+      break;
+    case TFUNCTION:
+    case TMACRO:
+      mark_obj(obj->params);
+      mark_obj(obj->body);
+      mark_obj(obj->env);
+      break;
+    case TENV:
+      mark_obj(obj->vars);
+      mark_obj(obj->up);
+      break;
+    default:
+      error("bug marking unknown object %d\n", obj->type);
+  }
+}
+
 static void gc(void *root) {
   //walk root and set flag
-
+  mark_obj(symbols);
+  for(void **frame = root; frame; frame = *(void***)frame) {
+    for(int i = 1; frame[i] != ROOT_END; i++) {
+      if(frame[i])
+        mark_obj(frame[i]);
+    }
+  }
 
   //free all objs that have flag set
   obj_list_t *f_entry = 0;
@@ -109,18 +178,19 @@ static void gc(void *root) {
     if(!(*entry)->obj->gc_r) {
       free((*entry)->obj);
       f_entry = *entry;
+      *entry = (*entry)->next;
+      free(f_entry);
+    } else {
+      (*entry)->obj->gc_r = 0;
+      entry = &((*entry)->next);
     }
-    (*entry)->obj->gc_r = 0;
-    entry = &((*entry)->next);
-    free(f_entry);
-    f_entry = 0;
   }
 }
 
 static obj_t *alloc(void *root, int type, size_t size) {
   size += offsetof(obj_t, value);
 
-  if(size + mem_used >= MAX_MEM)
+  if(size + mem_used >= MAX_MEM || ALWAYS_GC)
     gc(root);
 
   if(size + mem_used >= MAX_MEM) {
@@ -139,42 +209,10 @@ static obj_t *alloc(void *root, int type, size_t size) {
 
   mem_used += size;
   obj_list_add(obj);
-  
+
   return obj;
 }
 
-#define ROOT_END  ((void*)-1)
-
-#define ADD_ROOT(size)                          \
-  void *root_ADD_ROOT_[size+2];                 \
-  root_ADD_ROOT_[0] = root;                     \
-  for(int i = 1; i <= size; i++)                \
-    root_ADD_ROOT_[i] = 0;                      \
-  root_ADD_ROOT_[size+1] = ROOT_END;            \
-  root = root_ADD_ROOT_;
-
-#define DEFINE1(var1)                           \
-  ADD_ROOT(1);                                  \
-  obj_t **var1 = (obj_t**)(root_ADD_ROOT_ + 1); \
-
-#define DEFINE2(var1, var2)                     \
-  ADD_ROOT(2);                                  \
-  obj_t **var1 = (obj_t**)(root_ADD_ROOT_ + 1); \
-  obj_t **var2 = (obj_t**)(root_ADD_ROOT_ + 2); \
-    
-#define DEFINE3(var1, var2, var3)               \
-  ADD_ROOT(3);                                  \
-  obj_t **var1 = (obj_t**)(root_ADD_ROOT_ + 1); \
-  obj_t **var2 = (obj_t**)(root_ADD_ROOT_ + 2); \
-  obj_t **var3 = (obj_t**)(root_ADD_ROOT_ + 3); \
- 
-#define DEFINE4(var1, var2, var3, var4)         \
-  ADD_ROOT(4);                                  \
-  obj_t **var1 = (obj_t**)(root_ADD_ROOT_ + 1); \
-  obj_t **var2 = (obj_t**)(root_ADD_ROOT_ + 2); \
-  obj_t **var3 = (obj_t**)(root_ADD_ROOT_ + 3); \
-  obj_t **var4 = (obj_t**)(root_ADD_ROOT_ + 4); \
- 
 //---------------------------------------- 
 // Constructors
 //---------------------------------------- 
@@ -377,20 +415,20 @@ static void print(obj_t *obj) {
       return;
 
 #define CASE(type, ...)       \
-  case type:                  \
-      printf(__VA_ARGS__);    \
+    case type:                  \
+                                printf(__VA_ARGS__);    \
       return
-  CASE(TINT, "%d", obj->value);
-  CASE(TSYMBOL, "%s", obj->name);
-  CASE(TPRIMITIVE, "<primitive>");
-  CASE(TFUNCTION, "<function>");
-  CASE(TMACRO, "<macro>");
-  CASE(TTRUE, "t");
-  CASE(TNIL, "()");
+      CASE(TINT, "%d", obj->value);
+      CASE(TSYMBOL, "%s", obj->name);
+      CASE(TPRIMITIVE, "<primitive>");
+      CASE(TFUNCTION, "<function>");
+      CASE(TMACRO, "<macro>");
+      CASE(TTRUE, "t");
+      CASE(TNIL, "()");
 #undef CASE
-  
-  default:
-    error("compiler error: unknown tag type");
+
+    default:
+      error("compiler error: unknown tag type");
   }
 }
 
@@ -514,25 +552,25 @@ static obj_t *eval(void *root, obj_t **env, obj_t **obj) {
       //self-evaluating objects
       return *obj;
     case TSYMBOL: {
-      obj_t *bind = find(env, *obj);
-      if(!bind) 
-        error("undefined symbol: %s", (*obj)->name);
-      return bind->cdr;
-    }
+                    obj_t *bind = find(env, *obj);
+                    if(!bind) 
+                      error("undefined symbol: %s", (*obj)->name);
+                    return bind->cdr;
+                  }
     case TCELL: {
-      DEFINE3(fn, expanded, args);
-      *expanded = macroexpand(root, env, obj);
-      if(*expanded != *obj)
-        return eval(root, env, expanded);
-      *fn = (*obj)->car;
-      *fn = eval(root, env, fn);
-      *args = (*obj)->cdr;
-      if((*fn)->type != TPRIMITIVE && (*fn)->type != TFUNCTION)
-        error("the head of a list must be a function");
-      return apply(root, env, fn, args);
-    }
+                  DEFINE3(fn, expanded, args);
+                  *expanded = macroexpand(root, env, obj);
+                  if(*expanded != *obj)
+                    return eval(root, env, expanded);
+                  *fn = (*obj)->car;
+                  *fn = eval(root, env, fn);
+                  *args = (*obj)->cdr;
+                  if((*fn)->type != TPRIMITIVE && (*fn)->type != TFUNCTION)
+                    error("the head of a list must be a function");
+                  return apply(root, env, fn, args);
+                }
     default:
-      error("bug: eval: unknown tag type: %d", (*obj)->type);
+                error("bug: eval: unknown tag type: %d", (*obj)->type);
   }
 }
 
@@ -760,6 +798,12 @@ static obj_t *prim_cmp(void *root, obj_t **env, obj_t **list) {
   return values->car == values->cdr->car ? True : Nil;
 }
 
+// (quit)
+static obj_t *prim_quit(void *root, obj_t **env, obj_t **list) {
+  printf("bye!\n");
+  exit(0);
+}
+
 static void add_primitive(void *root, obj_t **env, char *name, primitive *fn) {
   DEFINE2(sym, prim);
   *sym = intern(root, name);
@@ -793,6 +837,7 @@ static void define_primitives(void *root, obj_t **env) {
   add_primitive(root, env, "if", prim_if);
   add_primitive(root, env, "eq", prim_eq);
   add_primitive(root, env, "cmp", prim_cmp);
+  add_primitive(root, env, "quit", prim_quit);
   add_primitive(root, env, "print", prim_print);
 }
 
@@ -801,7 +846,22 @@ static void define_primitives(void *root, obj_t **env) {
 //---------------------------------------- 
 
 int main(int argc, char **argv) {
-  
+
+#ifdef WINDOWS
+  system("cls");
+#else
+  system("clear");
+#endif
+
+  printf("___________________________\n");
+  printf("          _ _           \n");
+  printf("    _ __ | (_)___ _ __  \n");
+  printf("   | '_ \\| | / __| '_ \\ \n");
+  printf("   | |_) | | \\__ \\ |_) |\n");
+  printf("   | .__/|_|_|___/ .__/ \n");
+  printf("   |_|           |_|    \n");
+  printf("___________________________\n");
+
   // constants and primitives
   symbols = Nil;
   void *root = 0;
@@ -812,6 +872,7 @@ int main(int argc, char **argv) {
 
   // main loop
   for(;;) {
+    printf("> ");
     *expr = read_exp(root);
     if(!*expr) 
       return 0;
