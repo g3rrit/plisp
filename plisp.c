@@ -666,6 +666,17 @@ static obj_t *prim_add(void *root, obj_t **env, obj_t **list) {
   return make_int(root, sum);
 }
 
+// (mult <integer> ...)
+static obj_t *prim_mult(void *root, obj_t **env, obj_t **list) {
+  int sum = 1;
+  for(obj_t *args = eval_list(root, env, list); args != Nil; args = args->cdr) {
+    if(args->car->type != TINT)
+      error("add takes only numers");
+    sum *= args->car->value;
+  }
+  return make_int(root, sum);
+}
+
 // (sub <integer> ...)
 static obj_t *prim_sub(void *root, obj_t **env, obj_t **list) {
   obj_t *args = eval_list(root, env, list);
@@ -828,6 +839,7 @@ static void define_primitives(void *root, obj_t **env) {
   add_primitive(root, env, "gensym", prim_gensym);
   add_primitive(root, env, "add", prim_add);
   add_primitive(root, env, "sub", prim_sub);
+  add_primitive(root, env, "mult", prim_mult);
   add_primitive(root, env, "lt", prim_lt);
   add_primitive(root, env, "define", prim_define);
   add_primitive(root, env, "defun", prim_defun);
